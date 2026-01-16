@@ -1,117 +1,122 @@
-import numpy as np
-import pyttsx3
+import json
+import os
 
 class GameLogic:
-    def __init__(self, ruleset, player_names = ['Player 1', 'Player 2'], x01=501, num_legs=1, call_scores=True):
-        self.ruleset = ruleset
-        self.x01 = x01
-        self.num_legs = num_legs
-        self.player_names = player_names
+    def __init__(self, player_names, num_players=2):
+        self.player_names = player_names[:num_players] # list of names/initials, up to 6
         self.num_players = len(self.player_names)
-        self.leg_scores = [0] * self.num_players
-        self.scores = [x01] * self.num_players
-        self.starting_player, self.current_player = 0, 0
-        #self.point_history = {i: [[] for _ in range(self.num_legs*2 -1)] for i in range(self.num_players)}
-        self.num_dart_history = np.zeros((self.num_players, self.num_legs*2 - 1))
-        self.num_visits_history = np.zeros((self.num_players, self.num_legs*2 - 1))
-        self.averages = np.zeros(self.num_players)
+        self.current_player_idx = 0
+        self.darts_thrown_this_turn = 0
+        self.max_darts_per_turn = 5
 
-        self.call_scores = call_scores
-        if self.call_scores:
-            self.text_to_speech = pyttsx3.init()
+        # Golf Cricket setup: sectors/holes, marks needed (3 per hole), par-5 style
+        self.holes = [20, 19, 18, 17, 16, 15, 'bull'] # bull = 25/50
+        self.marks_needed = {h: 3 for h in self.holes}
+        self.marks = {name: {h: 0 for h in self.holes} for name in self.player_names}
+        self.scores = {name: 0 for name in self.player_names} # total "strokes"/penalty points; lower better
+        self.bust_limits = {h: 10 for h in self.holes if h != 'bull'}
+        self.bust_limits['bull'] = 20
 
-    def read_score(self, score):
-        if self.call_scores:
-            self.text_to_speech.say(str(score))
-            self.text_to_speech.runAndWait()
+        # Game state
+        self.game_over = False
+        self.winner = None
 
-    def get_score_for_dart(self, dart):
-        if dart == 'DB':
-            return 50
-        elif dart == 'SB':
-            return 25
-        elif dart == 'miss':
-            return 0
-        else:
-            number = int(dart[1:])
-            if dart[0] == 'S':
-                return number
-            elif dart[0] == 'T':
-                return number*3
-            elif dart[0] == 'D':
-                return number*2
-            
+        # All-time lowest scores (personal bests - lower is better)
+        self.all_time_file = "grice_games_all_time.json"
+        self.all_time_lows = self._load_all_time_lows()
+        self.personal_bests = {name: self.all_time_lows.get(name, float('inf')) for name in self.player_names}
 
-    def commit_score(self, darts):
-        if darts == 'q':
-            exit(0)
-        if type(darts) == str:
-            darts = darts.split()
-        
-        points = 0
-        for dart in darts:
-            if (dart[0] not in ['S', 'T', 'D'] or dart[1:] not in [str(x) for x in range(1, 21)]) and dart not in ['SB', 'DB', 'miss']:
-                print(f"Invalid dart: {dart}")
-                return
-            points += self.get_score_for_dart(dart)
-        
-        self.num_visits_history[self.current_player][np.sum(self.leg_scores)] += 1
-        
-        self.scores[self.current_player] -= points
-        
-        if self.ruleset == 'x01':
-            self.do_checks_x01_rules(darts, points)
-        elif self.ruleset == '121':
-            self.do_checks_121_rules(darts, points)
-        
-    
-    def do_checks_x01_rules(self, darts, points):
-        num_visits = self.num_visits_history[self.current_player][np.sum(self.leg_scores)]
-        
-        if self.scores[self.current_player] == 0 and darts[-1][0] == 'D': # check out
-            self.num_dart_history[self.current_player][np.sum(self.leg_scores)] += len(darts)
-            self.averages[self.current_player] = ((self.averages[self.current_player] * num_visits-1) / num_visits) + ((points * 3/len(darts))/num_visits) 
-            self.leg_scores[self.current_player] += 1
-            self.scores = [self.x01] * self.num_players
-            self.starting_player = (self.starting_player + 1) % self.num_players
-            if max(self.leg_scores) == self.num_legs:
-                if self.call_scores:
-                    self.text_to_speech.say("Game shot, and the match.")
-                    self.text_to_speech.runAndWait()
-                exit(0)
-            else:
-                self.current_player = self.starting_player
-                if self.call_scores:
-                    self.text_to_speech.say(f"Game shot. {self.player_names[self.starting_player]} to throw in leg {sum(self.leg_scores)+1}.")
-                    self.text_to_speech.runAndWait()
+    def _load_all_time_lows(self):
+        if os.path.exists(self.all_time_file):
+            try:
+                with open(self.all_time_file, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                return {}
+        return {}
 
-        else:
-            if self.scores[self.current_player] <= 1: # bust
-                self.scores[self.current_player] += points # Revert the points
-                points = 0 # for average calculation
+    def _save_all_time_lows(self):
+        with open(self.all_time_file, 'w') as f:
+            json.dump(self.all_time_lows, f, indent=4)
 
-            self.num_dart_history[self.current_player][np.sum(self.leg_scores)] += 3 # any visit that isn't a checkout is 3 darts
-            self.averages[self.current_player] = ((self.averages[self.current_player] * (num_visits-1)) / num_visits) + (points/num_visits)
-            self.current_player = (self.current_player + 1) % self.num_players
+    def register_dart(self, score):
+        """Called by video_processing when a dart hit is confirmed. score = int (e.g. 60 for T20, 50 for bull, etc.)"""
+        if self.game_over:
+            return
 
+        player = self.player_names[self.current_player_idx]
 
-    def do_checks_121_rules(self, darts, points):
-        if self.scores[self.current_player] == 0 and darts[-1][0] == 'D': # check out
-            self.leg_scores[self.current_player] += 1
-            self.x01 += 1
-            self.scores = [self.x01] * self.num_players
-            self.starting_player = (self.starting_player + 1) % self.num_players
+        # Determine which hole/sector this dart counts for (simplified - expand for exact Cricket logic)
+        # For example: if score in [20,40,60] -> hole=20, marks=1/2/3
+        hole = None
+        marks_this_dart = 1
+        if score == 50:
+            hole = 'bull'
+            marks_this_dart = 2 # bullseye = double bull? Adjust as needed
+        elif score % 20 == 0 and score // 20 in range(1, 4): # e.g. 20,40,60
+            hole = score // (marks_this_dart if marks_this_dart > 1 else 1)
+        # ... add more precise logic here for doubles/triples/outer bull
 
-        elif self.scores[self.current_player] <= 1: # bust
-            self.scores[self.current_player] += points # Revert the points
-            self.current_player = (self.current_player + 1) % self.num_players
+        if hole and hole in self.holes:
+            current_marks = self.marks[player][hole]
+            new_marks = min(current_marks + marks_this_dart, 3) # cap at 3
+            added_marks = new_marks - current_marks
 
-        else: # normal turn
-            self.current_player = (self.current_player + 1) % self.num_players
-        
-        if len(self.point_history[self.current_player][np.sum(self.leg_scores)]) == 3: # this is 3rd visit
-            self.scores = [121] * self.num_players
+            if added_marks > 0:
+                # Award "strokes" only on excess marks (golf penalty style)
+                excess = max(0, (current_marks + marks_this_dart) - 3)
+                penalty = excess * (self.bust_limits.get(hole, 10) if excess > 0 else 0)
+                self.scores[player] += penalty
 
+                self.marks[player][hole] = new_marks
+
+        self.darts_thrown_this_turn += 1
+
+        # Check if turn ends: 5 darts thrown OR 3 marks on current target(s) OR bust
+        # (your rule: keep throwing until 3 marks or bust, but max 5)
+        if self.darts_thrown_this_turn >= self.max_darts_per_turn or self._check_bust_or_complete():
+            self.end_turn()
+
+    def _check_bust_or_complete(self):
+        # Placeholder: return True if bust occurred this turn or all needed marks hit
+        # Customize: e.g. if any hole exceeded bust limit this turn
+        return False # expand with your bust logic
+
+    def end_turn(self):
+        self.darts_thrown_this_turn = 0
+        self.current_player_idx = (self.current_player_idx + 1) % self.num_players
+
+        # Check if game is over (all holes have 3 marks for someone? or manual end)
+        if self._is_game_over():
+            self.game_over = True
+            self.end_game()
+
+    def _is_game_over(self):
+        # Example condition: all holes closed (3 marks) by at least one player, then lowest score wins
+        # Customize to your exact win condition
+        return all(all(m >= 3 for m in player_marks.values()) for player_marks in self.marks.values())
+
+    def end_game(self):
+        # Update all-time lows for every player (lowest = best)
+        for name in self.player_names:
+            final = self.scores[name]
+            if final < self.personal_bests.get(name, float('inf')):
+                self.personal_bests[name] = final
+                self.all_time_lows[name] = final
+                print(f"New Grice Games record for {name}: {final}!") # can add TTS
+
+        self._save_all_time_lows()
+
+    def get_all_time_summary(self):
+        if not self.all_time_lows:
+            return "No Grice Games records yet."
+        lines = ["Grice Games All-Time Lowest Scores (Best):"]
+        sorted_records = sorted(self.all_time_lows.items(), key=lambda x: x[1])
+        for name, score in sorted_records:
+            lines.append(f"{name}: {score}")
+        return "\n".join(lines)
+
+    # Add other methods as needed (get_current_player, get_scores_str, etc.)
 
     def play(self):
         
