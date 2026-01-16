@@ -67,11 +67,26 @@ class GUI:
         demo_mode_checkbutton = ttk.Checkbutton(self.menu_frame, variable=self.demo_mode)
         demo_mode_checkbutton.grid(column=2, row=7, sticky=W)
 
-
         def _start_game():
             self.scorer = GameLogic(self.game_type.get(), [player.get() for player in self.player_names], self.starting_score.get(), self.legs.get(), self.call_scores.get())
             self._game_screen()
             self.video_processing.start(self, self.ip.get(), self.scorer, np.array((1200, 1600)))
+
+# NEW: All-time lows display (e.g. a label on the side/bottom)
+self.all_time_label = tk.Label(self.root, text="All-Time Low Scores\nLoading...", 
+                               font=("Arial", 12), justify="left", fg="gold", bg="black")
+self.all_time_label.pack(side="right", padx=20, pady=10) # or place in a frame
+
+# Update it when game starts or ends
+def update_all_time_display():
+    if hasattr(self.game, 'get_all_time_summary'): # assuming self.game is your GameLogic instance
+        self.all_time_label.config(text=self.game.get_all_time_summary())
+
+# Call this after game init and in end_game callback
+# e.g. after self.game = GameLogic(...)
+update_all_time_display()
+
+# Also call it after self.game.end_game() in your game-over handler
 
         # use number of players to create entry boxes for player names
         def update_player_names():
@@ -100,7 +115,15 @@ class GUI:
         add_player_names_button.grid(column=2, row=8, sticky=W, columnspan=2)
         self.root.bind("<Return>", lambda e: add_player_names_button.invoke())
         self.root.mainloop()
-    
+  
+# Near other labels
+self.all_time_label = tk.Label(self.root, text="Grice Games Records\nLoading...", font=("Arial", 12), justify="left", fg="gold")
+self.all_time_label.pack(side="right", padx=20)
+
+# After creating game_logic instance (self.game = GameLogic(...))
+self.all_time_label.config(text=self.game.get_all_time_summary())
+
+# Call again after end_game() triggers
 
     def _game_screen(self):
         self.player_frame.destroy()
